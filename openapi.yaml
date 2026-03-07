@@ -1,0 +1,286 @@
+openapi: "3.0.3"
+info:
+  title: Health Insurance Payment Orchestration Service API
+  description: |
+    Wix SPI Adapter + Back-Office API for the HealthSafe Insurance POS.
+    All financial amounts use `string` type to preserve DECIMAL(19,4) precision.
+  version: "1.0.0"
+  contact:
+    name: HealthSafe Engineering
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: wix-adapter
+    description: Wix SPI compliant payment endpoints
+  - name: admin
+    description: Back-office transaction monitoring and reconciliation
+
+paths:
+  /v1/create-order:
+    post:
+      tags: [wix-adapter]
+      summary: Create a payment order (Wix SPI)
+      description: |
+        Accepts a Wix SPI payload, validates HMAC-SHA256 signature,
+        enforces idempotency, and enqueues the payment for async processing.
+        Returns 202 Accepted immediately — actual processing is async.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateOrderRequest"
+            example:
+              payload:
+                merchantId: health-assurance-001
+                order:
+                  id: wix-order-778899
+                  amount: 150.00
+                  currency: USD
+                  description: Monthly Health Premium
+                customer:
+                  email: user@example.com
+              signature: hmac_sha256_hex_string_here
+      responses:
+        "202":
+          description: Order accepted and queued for async processing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateOrderResponse"
+        "400":
+          description: Validation error (missing fields, invalid amount)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Invalid HMAC signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /admin/transactions:
+    get:
+      tags: [admin]
+      summary: List all payment transactions
+      description: Returns all transactions ordered by most recent. Includes status (PENDING/COMPLETED/FAILED).
+      responses:
+        "200":
+          description: List of transactions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Transaction"
+
+  /admin/transactions/{id}/ledger:
+    get:
+      tags: [admin]
+      summary: Get double-entry ledger audit for a transaction
+      description: |
+        Returns the CREDIT and DEBIT ledger entries for a transaction.
+        Net balance should always be "0.0000" (double-entry invariant).
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Transaction UUID (idempotency key ID)
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Ledger audit details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LedgerAuditResponse"
+        "404":
+          description: Transaction not found
+
+  /admin/reconciliation:
+    get:
+      tags: [admin]
+      summary: Fetch gateway reconciliation report (mocked)
+      description: |
+        Compares ledger entries against the simulated gateway report.
+        Randomly flags ~15% of transactions as DISCREPANCY to demonstrate the feature.
+      responses:
+        "200":
+          description: Reconciliation items
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ReconciliationItem"
+
+  /admin/health:
+    get:
+      tags: [admin]
+      summary: Service health check
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              example:
+                status: ok
+                timestamp: "2026-03-06T09:00:00.000Z"
+
+components:
+  schemas:
+    CreateOrderRequest:
+      type: object
+      required: [payload, signature]
+      properties:
+        payload:
+          $ref: "#/components/schemas/WixPayload"
+        signature:
+          type: string
+          description: HMAC-SHA256 hex digest of JSON.stringify(payload)
+
+    WixPayload:
+      type: object
+      required: [merchantId, order, customer]
+      properties:
+        merchantId:
+          type: string
+          example: health-assurance-001
+        order:
+          type: object
+          required: [id, amount, currency, description]
+          properties:
+            id:
+              type: string
+              example: wix-order-778899
+            amount:
+              type: number
+              format: double
+              example: 150.00
+            currency:
+              type: string
+              example: USD
+            description:
+              type: string
+              example: Monthly Health Premium
+        customer:
+          type: object
+          required: [email]
+          properties:
+            email:
+              type: string
+              format: email
+
+    CreateOrderResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: Order received and queued for processing
+        orderId:
+          type: string
+          example: wix-order-778899
+        status:
+          type: string
+          enum: [PENDING, COMPLETED, FAILED]
+
+    Transaction:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        wixOrderId:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, COMPLETED, FAILED]
+        amount:
+          type: string
+          description: DECIMAL(19,4) as string to preserve precision
+          example: "150.0000"
+        currency:
+          type: string
+          example: USD
+        description:
+          type: string
+        customerEmail:
+          type: string
+          format: email
+        createdAt:
+          type: string
+          format: date-time
+
+    LedgerEntry:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountType:
+          type: string
+          enum: [REVENUE, GATEWAY_RECEIVABLE]
+        amount:
+          type: string
+          description: Positive = Credit, Negative = Debit
+          example: "150.0000"
+        createdAt:
+          type: string
+          format: date-time
+
+    LedgerAuditResponse:
+      type: object
+      properties:
+        transaction:
+          $ref: "#/components/schemas/Transaction"
+        ledgerEntries:
+          type: array
+          items:
+            $ref: "#/components/schemas/LedgerEntry"
+        balance:
+          type: string
+          description: Sum of all entry amounts — should be "0.0000"
+          example: "0.0000"
+        isBalanced:
+          type: boolean
+          description: True if balance equals exactly 0
+
+    ReconciliationItem:
+      type: object
+      properties:
+        orderId:
+          type: string
+        ledgerAmount:
+          type: string
+          example: "150.0000"
+        gatewayAmount:
+          type: string
+          example: "150.0000"
+        status:
+          type: string
+          enum: [MATCH, DISCREPANCY]
+        discrepancyReason:
+          type: string
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      properties:
+        statusCode:
+          type: integer
+        error:
+          type: string
+        message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        path:
+          type: string
